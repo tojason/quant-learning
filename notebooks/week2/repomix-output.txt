@@ -1,0 +1,1653 @@
+This file is a merged representation of a subset of the codebase, containing files not matching ignore patterns, combined into a single document by Repomix.
+
+================================================================
+File Summary
+================================================================
+
+Purpose:
+--------
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+
+File Format:
+------------
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Multiple file entries, each consisting of:
+  a. A separator line (================)
+  b. The file path (File: path/to/file)
+  c. Another separator line
+  d. The full contents of the file
+  e. A blank line
+
+Usage Guidelines:
+-----------------
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+
+Notes:
+------
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching these patterns are excluded: **/*.pkl, **/*.ipynb
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+
+Additional Info:
+----------------
+
+================================================================
+Directory Structure
+================================================================
+back_test/
+  __init__.py
+  backtesting.py
+  optimization.py
+data_processing/
+  __init__.py
+  data_processing_backup.py
+  data_processing.py
+plotting/
+  __init__.py
+  plotting.py
+strategy/
+  __init__.py
+  buy_and_hold.py
+
+================================================================
+Files
+================================================================
+
+================
+File: back_test/__init__.py
+================
+from .backtesting import run_backtest
+from .optimization import param_optimize_parallel
+
+__all__ = ['run_backtest']
+
+================
+File: back_test/backtesting.py
+================
+import backtrader as bt
+
+class MoneyDrawDownAnalyzer(bt.Analyzer):
+    """
+    自定义分析器：在回测过程中记录资金峰值，并计算最大回撤的“金额”。
+    """
+    def create_analysis(self):
+        self.max_value = None
+        self.max_drawdown = 0.0
+
+    def next(self):
+        current_value = self.strategy.broker.getvalue()
+        if self.max_value is None or current_value > self.max_value:
+            self.max_value = current_value
+        current_drawdown = self.max_value - current_value
+        if current_drawdown > self.max_drawdown:
+            self.max_drawdown = current_drawdown
+
+    def get_analysis(self):
+        return {'max_drawdown_money': self.max_drawdown}
+
+
+def run_backtest(ticker, df, start_date, end_date, strategy, 
+                 initial_cash=100000, strategy_params=None, print_log=True,
+                 timeframe=bt.TimeFrame.Minutes, compression=5,
+                 market_params=None):
+    """
+    回测函数：加载数据，执行策略，输出资金、回撤、收益率、夏普等。
+    """
+    if strategy_params is None:
+        strategy_params = {}
+    # 如果没有指定市场参数，则使用默认值（假设为美国市场）
+    if market_params is None:
+        market_params = {'trading_days': 252, 'minutes_per_day': 390}
+
+    cerebro = bt.Cerebro()
+
+    # 根据数据时间尺度和市场参数计算年化因子
+    if timeframe == bt.TimeFrame.Minutes:
+        bars_per_day = market_params['minutes_per_day'] / compression
+        factor = int(market_params['trading_days'] * bars_per_day)
+    elif timeframe == bt.TimeFrame.Days:
+        factor = market_params['trading_days']
+    elif timeframe == bt.TimeFrame.Weeks:
+        # 可以简单假设一年 52 周
+        factor = 52
+    else:
+        factor = 1  # 默认值，根据需求调整
+
+    # 添加分析器，使用动态计算的 factor
+    cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name='sharpe', 
+                        timeframe=timeframe, annualize=True, factor=factor)
+    cerebro.addanalyzer(bt.analyzers.DrawDown, _name='drawdown')
+    cerebro.addanalyzer(bt.analyzers.Returns, _name='returns')
+    cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name='trades')
+    cerebro.addanalyzer(MoneyDrawDownAnalyzer, _name='mydd')
+
+
+    # 添加策略
+    cerebro.addstrategy(strategy, **strategy_params)
+
+    # 添加数据
+    data_feed = bt.feeds.PandasData(
+        dataname=df,
+        timeframe=timeframe,
+        compression=compression,
+        fromdate=start_date,
+        todate=end_date
+    )
+    data_feed._name = ticker
+    cerebro.adddata(data_feed)
+
+    # 设置初始资金
+    cerebro.broker.setcash(initial_cash)
+    if print_log:
+        print(f"初始资金: {cerebro.broker.getvalue():.2f}")
+
+    # 设置手续费和滑点
+    cerebro.broker.setcommission(commission=0.001)
+    cerebro.broker.set_slippage_fixed(0.05, slip_open=True)
+
+    # 运行回测
+    results = cerebro.run()
+    strat = results[0]
+
+    final_value = cerebro.broker.getvalue()
+    if print_log:
+        print(f"回测结束资金: {final_value:.2f}")
+        print("=== 回测分析报告 ===")
+
+    # 从分析器获取结果
+    sharpe = strat.analyzers.sharpe.get_analysis()
+    drawdown = strat.analyzers.drawdown.get_analysis()
+    returns = strat.analyzers.returns.get_analysis()
+    trades = strat.analyzers.trades.get_analysis()
+    mydd = strat.analyzers.mydd.get_analysis()
+
+    # 指标提取
+    sharpe_ratio = sharpe.get('sharperatio', None)
+    max_dd_pct = drawdown.get('max', {}).get('drawdown', None)
+    max_dd_money = mydd.get('max_drawdown_money', 0)
+    rtot = returns.get('rtot', None)
+    rnorm = returns.get('rnorm', None)
+
+    # 打印日志
+    if print_log:
+        if sharpe_ratio is not None:
+            print(f"夏普比率: {sharpe_ratio:.4f}")
+        else:
+            print("夏普比率: N/A")
+        if max_dd_pct is not None:
+            print(f"最大回撤比例: {max_dd_pct:.2f}%")
+        else:
+            print("最大回撤比例: N/A")
+        print(f"最大回撤金额(自定义): {max_dd_money:.2f}")
+        if rtot is not None:
+            print(f"累计收益率: {rtot*100:.2f}%")
+        else:
+            print("累计收益率: N/A")
+        if rnorm is not None:
+            print(f"年化收益率: {rnorm*100:.2f}%")
+        else:
+            print("年化收益率: N/A")
+
+        total_trades = trades.get('total', {}).get('total', 0)
+        won_trades = trades.get('won', {}).get('total', 0)
+        print("=== 交易详情 ===")
+        print(f"总交易笔数: {total_trades}")
+        print(f"胜率: {won_trades} / {total_trades}")
+
+    # 返回结果
+    result_dict = {
+        'final_value': final_value,
+        'sharpe_ratio': sharpe_ratio,
+        'max_dd_pct': max_dd_pct,
+        'max_dd_money': max_dd_money,
+        'rtot': rtot,
+        'rnorm': rnorm
+    }
+
+    return result_dict, cerebro
+
+================
+File: back_test/optimization.py
+================
+import itertools
+import pandas as pd
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from .backtesting import run_backtest  # 确保 run_backtest 可被子进程导入
+
+def _worker_run_backtest(ticker, df, start_date, end_date,
+                         strategy_cls, initial_cash, combo_dict):
+    """
+    辅助函数：给每个进程使用的工作函数。
+    传入 combo_dict 等参数，内部调用 run_backtest 并返回 {参数 + 结果} 的字典。
+    """
+    # 这里可以做任何你想要的预处理，比如把 float 转成 int...
+    # combo_dict['rsi_period'] = int(combo_dict['rsi_period'])
+
+    result_dict, _ = run_backtest(
+        ticker=ticker,
+        df=df,
+        start_date=start_date,
+        end_date=end_date,
+        strategy=strategy_cls,
+        initial_cash=initial_cash,
+        strategy_params=combo_dict,
+        print_log=False  # 避免在并行时打印大量日志
+    )
+
+    # 合并参数和结果
+    row_data = {**combo_dict, **result_dict}
+    return row_data
+
+
+def param_optimize_parallel(ticker, df, start_date, end_date, strategy_cls, param_grid, 
+                           initial_cash=100000, sort_metric='sharpe_ratio',
+                           max_workers=None):
+    """
+    使用 run_backtest 函数对 param_grid 中的所有参数组合进行回测(并行模式)，
+    并按 sort_metric 排序返回结果。
+
+    参数：
+    - ticker, df, start_date, end_date, strategy_cls, initial_cash: 
+      与 run_backtest 相同，不再多解释。
+    - param_grid: dict, 形如:
+        {
+          'rsi_period': [10, 14],
+          'bb_period': [20, 30],
+          ...
+        }
+    - sort_metric:   按哪个指标来排序，例如 'sharpe_ratio', 'final_value', 'rnorm', ...
+    - max_workers:   并行进程数, 默认为 None(等于CPU核心数)
+
+    返回:
+    - results_df: 记录所有组合及其回测指标的 DataFrame
+    - best_params: 表现最优的参数组合（基于 sort_metric）
+    """
+    param_names = list(param_grid.keys())
+    all_combos = list(itertools.product(*param_grid.values()))
+
+    # 存放每个参数组合回测后的结果
+    results_list = []
+
+    # 使用 ProcessPoolExecutor 并行执行
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        # 提交所有任务
+        future_to_combo = {}
+        for combo in all_combos:
+            combo_dict = dict(zip(param_names, combo))
+            future = executor.submit(
+                _worker_run_backtest,
+                ticker, df, start_date, end_date, strategy_cls, initial_cash, combo_dict
+            )
+            future_to_combo[future] = combo_dict
+
+        # 收集执行结果
+        for future in as_completed(future_to_combo):
+            combo_dict = future_to_combo[future]
+            try:
+                row_data = future.result()
+                results_list.append(row_data)
+            except Exception as e:
+                # 如果某个组合运行报错，可以在这里打印或记录
+                print(f"[警告] 参数 {combo_dict} 回测时出错: {e}")
+                # 也可选择 continue 或其他处理
+
+    # 整理结果为 DataFrame
+    results_df = pd.DataFrame(results_list)
+
+    # 如果 sort_metric 不在列里，先给个警告
+    if not results_df.empty and sort_metric not in results_df.columns:
+        print(f"[警告] sort_metric='{sort_metric}' 不存在于结果列中，将使用 'final_value' 排序。")
+        sort_metric = 'final_value'
+
+    # 如果结果为空或sort_metric全是NaN
+    if results_df.empty or results_df[sort_metric].dropna().empty:
+        print(f"[警告] 排序指标 '{sort_metric}' 全为 None 或 NaN, 或 results_df 为空，无法排序！")
+        return results_df, {}
+
+    # 排序(默认从大到小)
+    results_df.sort_values(by=sort_metric, ascending=False, inplace=True)
+
+    best_row = results_df.iloc[0].to_dict()
+    best_params = {k: best_row[k] for k in param_names if k in best_row}
+
+    return results_df, best_params
+
+def param_optimize(ticker, df, start_date, end_date, strategy_cls, param_grid, 
+                   initial_cash=100000, sort_metric='sharpe_ratio'):
+    """
+    使用 run_backtest 函数对 param_grid 中的所有参数组合进行回测，
+    并按 sort_metric 排序返回结果。
+
+    参数：
+    - ticker, df, start_date, end_date, strategy_cls, initial_cash: 
+      与 run_backtest 相同，不再多解释。
+    - param_grid: dict，形如:
+        {
+          'rsi_period': [10, 14],
+          'bb_period': [20, 30],
+          ...
+        }
+    - sort_metric: 按哪个指标来排序，例如 'sharpe_ratio', 'final_value', 'rnorm', ...
+
+    返回:
+    - results_df: 记录所有组合及其回测指标的 DataFrame
+    - best_params: 表现最优的参数组合（基于 sort_metric）
+    """
+    results_list = []
+    param_names = list(param_grid.keys())
+    all_combos = list(itertools.product(*param_grid.values()))
+
+    for combo in all_combos:
+        combo_dict = dict(zip(param_names, combo))
+        # 调用 run_backtest，这里可设置 print_log=False，避免大量日志输出
+        result_dict, _ = run_backtest(
+            ticker=ticker,
+            df=df,
+            start_date=start_date,
+            end_date=end_date,
+            strategy=strategy_cls,
+            initial_cash=initial_cash,
+            strategy_params=combo_dict,
+            print_log=False
+        )
+
+        # 合并参数组合和回测结果
+        row_data = {**combo_dict, **result_dict}
+        results_list.append(row_data)
+
+    # 整理成 DataFrame
+    results_df = pd.DataFrame(results_list)
+
+    # 如果 sort_metric 不在列里，先给个警告
+    if sort_metric not in results_df.columns:
+        print(f"[警告] sort_metric='{sort_metric}' 不存在于结果列中，将使用 'final_value' 排序。")
+        sort_metric = 'final_value'
+
+    # 排序前，先看里面是否都是 NaN
+    if results_df[sort_metric].dropna().empty:
+        print(f"[警告] 排序指标 '{sort_metric}' 全为 None 或 NaN, 无法排序！")
+        # 直接返回即可
+        return results_df, {}
+
+    # 排序(默认从大到小)
+    results_df.sort_values(by=sort_metric, ascending=False, inplace=True)
+    best_row = results_df.iloc[0].to_dict()
+
+    # 抽取最优参数
+    best_params = {k: best_row[k] for k in param_names if k in best_row}
+
+    return results_df, best_params
+
+================
+File: data_processing/__init__.py
+================
+from .data_processing import load_data_yf, load_data_av, flatten_yf_columns, standardize_columns, load_data_year, load_data_multi_year
+
+__all__ = ['load_data', 'flatten_yf_columns', 'standardize_columns']
+
+================
+File: data_processing/data_processing_backup.py
+================
+import datetime
+import yfinance as yf
+import pandas as pd
+import os
+import requests
+from datetime import timedelta
+import calendar
+
+def load_data_yf(ticker: str, start_date: datetime.datetime, end_date: datetime.datetime, interval: str = "5m") -> pd.DataFrame:
+    """
+    使用 yfinance 下载指定股票在特定时间区间和频率的行情数据。
+    实现本地缓存功能，避免重复下载；若数据频率为 5m 且时间范围超过 30 天，
+    则分段下载（每次最多 30 天）后合并数据并按日期排序返回。
+    """
+    # 定义缓存目录和缓存文件名
+    cache_dir = "cache"
+    if not os.path.exists(cache_dir):
+        os.makedirs(cache_dir)
+    
+    cache_filename = f"{ticker}_{start_date.strftime('%Y%m%d')}_{end_date.strftime('%Y%m%d')}_{interval}.pkl"
+    cache_path = os.path.join(cache_dir, cache_filename)
+    
+    # 尝试从本地缓存加载数据
+    if os.path.exists(cache_path):
+        try:
+            df = pd.read_pickle(cache_path)
+            print("从本地缓存加载数据")
+            return df
+        except Exception as e:
+            print("加载缓存失败，准备重新下载数据:", e)
+    
+    # 如果缓存不存在或加载失败，则从 yf 下载数据
+    if interval == "5m":
+        max_days = 30
+        data_chunks = []
+        current_start = start_date
+        while current_start < end_date:
+            current_end = current_start + timedelta(days=max_days)
+            if current_end > end_date:
+                current_end = end_date
+            print(f"下载数据段: {current_start.strftime('%Y-%m-%d')} 到 {current_end.strftime('%Y-%m-%d')}")
+            df_chunk = yf.download(
+                tickers=ticker,
+                start=current_start.strftime('%Y-%m-%d'),
+                end=current_end.strftime('%Y-%m-%d'),
+                interval=interval
+            )
+            if not df_chunk.empty:
+                data_chunks.append(df_chunk)
+            current_start = current_end
+        if data_chunks:
+            df = pd.concat(data_chunks)
+            df.sort_index(inplace=True)
+        else:
+            df = pd.DataFrame()
+    else:
+        # 如果不是 5m 频率，则直接下载
+        df = yf.download(
+            tickers=ticker,
+            start=start_date.strftime('%Y-%m-%d'),
+            end=end_date.strftime('%Y-%m-%d'),
+            interval=interval
+        )
+    
+    # 保存数据到本地缓存
+    try:
+        df.to_pickle(cache_path)
+        print("数据已保存到本地缓存")
+    except Exception as e:
+        print("保存缓存失败:", e)
+    
+    return df
+
+def load_data_av(ticker: str, start_date: datetime.datetime, end_date: datetime.datetime, interval: str = "5min", api_key: str = None) -> pd.DataFrame:
+    """
+    使用 Alpha Vantage API 下载指定股票在特定时间区间和频率的行情数据。
+    实现本地缓存功能，避免重复下载。
+    
+    Parameters:
+    -----------
+    ticker : str
+        股票代码
+    start_date : datetime
+        开始日期
+    end_date : datetime
+        结束日期
+    interval : str
+        数据频率，可选值：
+        - "1min" : 1分钟
+        - "5min" : 5分钟
+        - "15min" : 15分钟
+        - "30min" : 30分钟
+        - "60min" : 60分钟
+        - "daily" : 每日
+    api_key : str
+        Alpha Vantage API key，如果为None则使用环境变量ALPHA_VANTAGE_API_KEY
+    """
+    if api_key is None:
+        api_key = os.getenv("ALPHA_VANTAGE_API_KEY")
+        if api_key is None:
+            raise ValueError("需要提供Alpha Vantage API key")
+    
+    # 定义缓存目录和缓存文件名
+    cache_dir = "cache"
+    if not os.path.exists(cache_dir):
+        os.makedirs(cache_dir)
+    
+    cache_filename = f"a v_{ticker}_{start_date.strftime('%Y%m%d')}_{end_date.strftime('%Y%m%d')}_{interval}.pkl"
+    cache_path = os.path.join(cache_dir, cache_filename)
+    
+    # 尝试从本地缓存加载数据
+    if os.path.exists(cache_path):
+        try:
+            df = pd.read_pickle(cache_path)
+            print("从本地缓存加载数据")
+            return df
+        except Exception as e:
+            print("加载缓存失败，准备重新下载数据:", e)
+    
+    # 构建API URL
+    function = "TIME_SERIES_INTRADAY" if interval.endswith("min") else "TIME_SERIES_DAILY"
+    interval_param = interval if interval.endswith("min") else None
+    
+    base_url = "https://www.alphavantage.co/query"
+    params = {
+        "function": function,
+        "symbol": ticker,
+        "apikey": api_key,
+        "outputsize": "full"  # 获取完整数据集
+    }
+    if interval_param:
+        params["interval"] = interval_param
+    
+    # 发送请求获取数据
+    response = requests.get(base_url, params=params)
+    data = response.json()
+    
+    # 解析返回的数据
+    if function == "TIME_SERIES_INTRADAY":
+        time_series_key = f"Time Series ({interval})"
+    else:
+        time_series_key = "Time Series (Daily)"
+    
+    if time_series_key not in data:
+        raise ValueError(f"API返回错误: {data.get('Note', data)}")
+    
+    # 将数据转换为DataFrame
+    df = pd.DataFrame.from_dict(data[time_series_key], orient="index")
+    
+    # 重命名列
+    column_map = {
+        "1. open": "open",
+        "2. high": "high",
+        "3. low": "low",
+        "4. close": "close",
+        "5. volume": "volume"
+    }
+    df.rename(columns=column_map, inplace=True)
+    
+    # 转换数据类型
+    for col in ["open", "high", "low", "close"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df["volume"] = pd.to_numeric(df["volume"], errors="coerce")
+    
+    # 设置日期索引
+    df.index = pd.to_datetime(df.index)
+    df = df.sort_index()
+    
+    # 过滤日期范围
+    df = df[start_date:end_date]
+    
+    # 保存数据到本地缓存
+    try:
+        df.to_pickle(cache_path)
+        print("数据已保存到本地缓存")
+    except Exception as e:
+        print("保存缓存失败:", e)
+    
+    return df
+
+def flatten_yf_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    将 yfinance 下载的数据 DataFrame 列索引进行扁平化处理，并统一为小写格式。
+    支持单只或多只股票的数据格式。
+    """
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = [
+            "_".join(tuple(filter(None, col))).lower()
+            for col in df.columns.values
+        ]
+    else:
+        df.columns = [col.lower() for col in df.columns]
+    return df
+
+def standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    如果除日期外的所有列都以相同后缀结尾（例如 _aapl），则去除后缀，
+    保留 open、high、low、close、volume 等标准字段名称。
+    """
+    # 保证日期列名称为 "datetime"
+    if "datetime" not in df.columns and "date" in df.columns:
+        df.rename(columns={"date": "datetime"}, inplace=True)
+
+    # 对非日期列，如果存在下划线，则取下划线前部分
+    new_cols = {}
+    for col in df.columns:
+        if col != "datetime" and "_" in col:
+            new_cols[col] = col.split("_")[0]
+    if new_cols:
+        df.rename(columns=new_cols, inplace=True)
+
+    return df
+
+def load_data_month(ticker: str, month: str, interval: str = "5min", api_key: str = None) -> pd.DataFrame:
+    """
+    使用 Alpha Vantage API 获取指定月份的历史数据。
+    
+    Parameters:
+    -----------
+    ticker : str
+        股票代码
+    month : str
+        目标月份，格式为'YYYY-MM'，例如'2009-01'
+    interval : str
+        数据频率，可选值：
+        - "1min" : 1分钟
+        - "5min" : 5分钟
+        - "15min" : 15分钟
+        - "30min" : 30分钟
+        - "60min" : 60分钟
+    api_key : str
+        Alpha Vantage API key，如果为None则使用环境变量ALPHA_VANTAGE_API_KEY
+    
+    Returns:
+    --------
+    pd.DataFrame
+        包含该月份历史数据的DataFrame
+    """
+    if api_key is None:
+        api_key = os.getenv("ALPHA_VANTAGE_API_KEY")
+        if api_key is None:
+            raise ValueError("需要提供Alpha Vantage API key")
+    
+    # 定义缓存目录和缓存文件名
+    cache_dir = "cache"
+    if not os.path.exists(cache_dir):
+        os.makedirs(cache_dir)
+    
+    cache_filename = f"av_{ticker}_{month}_{interval}.pkl"
+    cache_path = os.path.join(cache_dir, cache_filename)
+    
+    # 尝试从本地缓存加载数据
+    if os.path.exists(cache_path):
+        try:
+            df = pd.read_pickle(cache_path)
+            print(f"从本地缓存加载{month}的数据")
+            return df
+        except Exception as e:
+            print(f"加载{month}缓存失败，准备重新下载数据:", e)
+    
+    # 构建API URL
+    base_url = "https://www.alphavantage.co/query"
+    params = {
+        "function": "TIME_SERIES_INTRADAY",
+        "symbol": ticker,
+        "interval": interval,
+        "month": month,
+        "outputsize": "full",
+        "apikey": api_key
+    }
+    
+    # 发送请求获取数据
+    response = requests.get(base_url, params=params)
+    data = response.json()
+    
+    # 解析返回的数据
+    time_series_key = f"Time Series ({interval})"
+    if time_series_key not in data:
+        raise ValueError(f"API返回错误: {data.get('Note', data)}")
+    
+    # 将数据转换为DataFrame
+    df = pd.DataFrame.from_dict(data[time_series_key], orient="index")
+    
+    # 重命名列
+    column_map = {
+        "1. open": "open",
+        "2. high": "high",
+        "3. low": "low",
+        "4. close": "close",
+        "5. volume": "volume"
+    }
+    df.rename(columns=column_map, inplace=True)
+    
+    # 转换数据类型
+    for col in ["open", "high", "low", "close"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df["volume"] = pd.to_numeric(df["volume"], errors="coerce")
+    
+    # 设置日期索引
+    df.index = pd.to_datetime(df.index)
+    df = df.sort_index()
+    
+    # 保存数据到本地缓存
+    try:
+        df.to_pickle(cache_path)
+        print(f"{month}的数据已保存到本地缓存")
+    except Exception as e:
+        print(f"保存{month}缓存失败:", e)
+    
+    return df
+
+def load_data_year(ticker: str, year: int, interval: str = "5min", api_key: str = None) -> pd.DataFrame:
+    """
+    使用 Alpha Vantage API 获取指定年份的历史数据。
+    通过按月获取数据并合并来实现。
+    
+    Parameters:
+    -----------
+    ticker : str
+        股票代码
+    year : int
+        目标年份，例如2009
+    interval : str
+        数据频率，可选值：
+        - "1min" : 1分钟
+        - "5min" : 5分钟
+        - "15min" : 15分钟
+        - "30min" : 30分钟
+        - "60min" : 60分钟
+    api_key : str
+        Alpha Vantage API key，如果为None则使用环境变量ALPHA_VANTAGE_API_KEY
+    
+    Returns:
+    --------
+    pd.DataFrame
+        包含该年份所有历史数据的DataFrame
+    """
+    if api_key is None:
+        api_key = os.getenv("ALPHA_VANTAGE_API_KEY")
+        if api_key is None:
+            raise ValueError("需要提供Alpha Vantage API key")
+    
+    # 定义缓存目录和缓存文件名
+    cache_dir = "cache"
+    cache_filename = f"av_{ticker}_{year}_{interval}.pkl"
+    cache_path = os.path.join(cache_dir, cache_filename)
+    
+    # 尝试从本地缓存加载数据
+    if os.path.exists(cache_path):
+        try:
+            df = pd.read_pickle(cache_path)
+            print(f"从本地缓存加载{year}年的数据")
+            return df
+        except Exception as e:
+            print(f"加载{year}年缓存失败，准备重新下载数据:", e)
+    
+    # 获取每个月的数据
+    monthly_data = []
+    for month in range(1, 13):
+        month_str = f"{year}-{month:02d}"
+        try:
+            print(f"获取{month_str}的数据...")
+            df_month = load_data_month(ticker, month_str, interval, api_key)
+            if not df_month.empty:
+                monthly_data.append(df_month)
+            # Alpha Vantage API有访问频率限制，添加延时
+            import time
+            time.sleep(12)  # 每分钟最多5个请求
+        except Exception as e:
+            print(f"获取{month_str}数据失败: {e}")
+    
+    # 合并所有月份的数据
+    if not monthly_data:
+        print(f"警告：{year}年没有获取到任何数据")
+        return pd.DataFrame()
+    
+    df = pd.concat(monthly_data)
+    df = df.sort_index()
+    
+    # 保存数据到本地缓存
+    try:
+        df.to_pickle(cache_path)
+        print(f"{year}年的数据已保存到本地缓存")
+    except Exception as e:
+        print(f"保存{year}年缓存失败:", e)
+    
+    return df 
+
+def load_data_multi_year(ticker: str, start_year: int, end_year: int, interval: str = "5min", api_key: str = None) -> pd.DataFrame:
+    """
+    使用 Alpha Vantage API 获取指定年份范围内的历史数据。
+    通过按年获取数据并合并来实现。
+    
+    Parameters:
+    -----------
+    ticker : str
+        股票代码
+    start_year : int
+        开始年份，例如2009
+    end_year : int
+        结束年份，例如2023
+    interval : str
+        数据频率，可选值：
+        - "1min" : 1分钟
+        - "5min" : 5分钟
+        - "15min" : 15分钟
+        - "30min" : 30分钟
+        - "60min" : 60分钟
+    api_key : str
+        Alpha Vantage API key，如果为None则使用环境变量ALPHA_VANTAGE_API_KEY
+    
+    Returns:
+    --------
+    pd.DataFrame
+        包含指定年份范围内所有历史数据的DataFrame
+    """
+    if start_year > end_year:
+        raise ValueError("start_year 必须小于或等于 end_year")
+    
+    all_data = []
+    
+    for year in range(start_year, end_year + 1):
+        try:
+            print(f"获取 {year} 年的数据...")
+            df_year = load_data_year(ticker, year, interval, api_key)
+            if not df_year.empty:
+                all_data.append(df_year)
+            # Alpha Vantage API有访问频率限制，添加延时
+            import time
+            time.sleep(12)  # 每分钟最多5个请求
+        except Exception as e:
+            print(f"获取 {year} 年数据失败: {e}")
+    
+    if not all_data:
+        print(f"警告：未能获取 {start_year}-{end_year} 年的数据")
+        return pd.DataFrame()
+    
+    df = pd.concat(all_data)
+    df = df.sort_index()
+    
+    return df
+
+================
+File: data_processing/data_processing.py
+================
+import datetime
+import yfinance as yf
+import pandas as pd
+import os
+import requests
+from datetime import timedelta
+import calendar
+
+def load_data_yf(ticker: str, start_date: datetime.datetime, end_date: datetime.datetime, interval: str = "5m") -> pd.DataFrame:
+    """
+    使用 yfinance 下载指定股票在特定时间区间和频率的行情数据。
+    实现本地缓存功能，避免重复下载；若数据频率为 5m 且时间范围超过 30 天，
+    则分段下载（每次最多 30 天）后合并数据并按日期排序返回。
+    """
+    # 定义缓存目录和缓存文件名
+    cache_dir = "cache"
+    if not os.path.exists(cache_dir):
+        os.makedirs(cache_dir)
+    
+    cache_filename = f"yf_{ticker}_{start_date.strftime('%Y%m%d')}_{end_date.strftime('%Y%m%d')}_{interval}.pkl"
+    cache_path = os.path.join(cache_dir, cache_filename)
+    
+    # 尝试从本地缓存加载数据
+    if os.path.exists(cache_path):
+        try:
+            df = pd.read_pickle(cache_path)
+            print("从本地缓存加载数据")
+            return df
+        except Exception as e:
+            print("加载缓存失败，准备重新下载数据:", e)
+    
+    # 如果缓存不存在或加载失败，则从 yf 下载数据
+    if interval == "5m":
+        max_days = 30
+        data_chunks = []
+        current_start = start_date
+        while current_start < end_date:
+            current_end = current_start + timedelta(days=max_days)
+            if current_end > end_date:
+                current_end = end_date
+            print(f"下载数据段: {current_start.strftime('%Y-%m-%d')} 到 {current_end.strftime('%Y-%m-%d')}")
+            df_chunk = yf.download(
+                tickers=ticker,
+                start=current_start.strftime('%Y-%m-%d'),
+                end=current_end.strftime('%Y-%m-%d'),
+                interval=interval
+            )
+            if not df_chunk.empty:
+                data_chunks.append(df_chunk)
+            current_start = current_end
+        if data_chunks:
+            df = pd.concat(data_chunks)
+            df.sort_index(inplace=True)
+        else:
+            df = pd.DataFrame()
+    else:
+        # 如果不是 5m 频率，则直接下载
+        df = yf.download(
+            tickers=ticker,
+            start=start_date.strftime('%Y-%m-%d'),
+            end=end_date.strftime('%Y-%m-%d'),
+            interval=interval
+        )
+    
+    # 保存数据到本地缓存
+    try:
+        df.to_pickle(cache_path)
+        print("数据已保存到本地缓存")
+    except Exception as e:
+        print("保存缓存失败:", e)
+    
+    return df
+
+def load_data_av(ticker: str, start_date: datetime.datetime, end_date: datetime.datetime, interval: str = "5min", api_key: str = None) -> pd.DataFrame:
+    """
+    使用 Alpha Vantage API 下载指定股票在特定时间区间和频率的行情数据。
+    实现本地缓存功能，避免重复下载。
+    
+    Parameters:
+    -----------
+    ticker : str
+        股票代码
+    start_date : datetime
+        开始日期
+    end_date : datetime
+        结束日期
+    interval : str
+        数据频率，可选值：
+        - "1min" : 1分钟
+        - "5min" : 5分钟
+        - "15min" : 15分钟
+        - "30min" : 30分钟
+        - "60min" : 60分钟
+        - "daily" : 每日
+    api_key : str
+        Alpha Vantage API key，如果为None则使用环境变量ALPHA_VANTAGE_API_KEY
+    """
+    if api_key is None:
+        api_key = os.getenv("ALPHA_VANTAGE_API_KEY")
+        if api_key is None:
+            raise ValueError("需要提供Alpha Vantage API key")
+    
+    # 定义缓存目录和缓存文件名
+    cache_dir = "cache"
+    if not os.path.exists(cache_dir):
+        os.makedirs(cache_dir)
+    
+    cache_filename = f"a v_{ticker}_{start_date.strftime('%Y%m%d')}_{end_date.strftime('%Y%m%d')}_{interval}.pkl"
+    cache_path = os.path.join(cache_dir, cache_filename)
+    
+    # 尝试从本地缓存加载数据
+    if os.path.exists(cache_path):
+        try:
+            df = pd.read_pickle(cache_path)
+            print("从本地缓存加载数据")
+            return df
+        except Exception as e:
+            print("加载缓存失败，准备重新下载数据:", e)
+    
+    # 构建API URL
+    function = "TIME_SERIES_INTRADAY" if interval.endswith("min") else "TIME_SERIES_DAILY"
+    interval_param = interval if interval.endswith("min") else None
+    
+    base_url = "https://www.alphavantage.co/query"
+    params = {
+        "function": function,
+        "symbol": ticker,
+        "apikey": api_key,
+        "outputsize": "full"  # 获取完整数据集
+    }
+    if interval_param:
+        params["interval"] = interval_param
+    
+    # 发送请求获取数据
+    response = requests.get(base_url, params=params)
+    data = response.json()
+    
+    # 解析返回的数据
+    if function == "TIME_SERIES_INTRADAY":
+        time_series_key = f"Time Series ({interval})"
+    else:
+        time_series_key = "Time Series (Daily)"
+    
+    if time_series_key not in data:
+        raise ValueError(f"API返回错误: {data.get('Note', data)}")
+    
+    # 将数据转换为DataFrame
+    df = pd.DataFrame.from_dict(data[time_series_key], orient="index")
+    
+    # 重命名列
+    column_map = {
+        "1. open": "open",
+        "2. high": "high",
+        "3. low": "low",
+        "4. close": "close",
+        "5. volume": "volume"
+    }
+    df.rename(columns=column_map, inplace=True)
+    
+    # 转换数据类型
+    for col in ["open", "high", "low", "close"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df["volume"] = pd.to_numeric(df["volume"], errors="coerce")
+    
+    # 设置日期索引
+    df.index = pd.to_datetime(df.index)
+    df = df.sort_index()
+    
+    # 过滤日期范围
+    df = df[start_date:end_date]
+    
+    # 保存数据到本地缓存
+    try:
+        df.to_pickle(cache_path)
+        print("数据已保存到本地缓存")
+    except Exception as e:
+        print("保存缓存失败:", e)
+    
+    return df
+
+def flatten_yf_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    将 yfinance 下载的数据 DataFrame 列索引进行扁平化处理，并统一为小写格式。
+    支持单只或多只股票的数据格式。
+    """
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = [
+            "_".join(tuple(filter(None, col))).lower()
+            for col in df.columns.values
+        ]
+    else:
+        df.columns = [col.lower() for col in df.columns]
+    return df
+
+def standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    如果除日期外的所有列都以相同后缀结尾（例如 _aapl），则去除后缀，
+    保留 open、high、low、close、volume 等标准字段名称。
+    """
+    # 保证日期列名称为 "datetime"
+    if "datetime" not in df.columns and "date" in df.columns:
+        df.rename(columns={"date": "datetime"}, inplace=True)
+
+    # 对非日期列，如果存在下划线，则取下划线前部分
+    new_cols = {}
+    for col in df.columns:
+        if col != "datetime" and "_" in col:
+            new_cols[col] = col.split("_")[0]
+    if new_cols:
+        df.rename(columns=new_cols, inplace=True)
+
+    return df
+
+def load_data_month(ticker: str, month: str, interval: str = "5min", api_key: str = None) -> pd.DataFrame:
+    """
+    使用 Alpha Vantage API 获取指定月份的历史数据。
+    
+    Parameters:
+    -----------
+    ticker : str
+        股票代码
+    month : str
+        目标月份，格式为'YYYY-MM'，例如'2009-01'
+    interval : str
+        数据频率，可选值：
+        - "1min" : 1分钟
+        - "5min" : 5分钟
+        - "15min" : 15分钟
+        - "30min" : 30分钟
+        - "60min" : 60分钟
+    api_key : str
+        Alpha Vantage API key，如果为None则使用环境变量ALPHA_VANTAGE_API_KEY
+    
+    Returns:
+    --------
+    pd.DataFrame
+        包含该月份历史数据的DataFrame
+    """
+    if api_key is None:
+        api_key = os.getenv("ALPHA_VANTAGE_API_KEY")
+        if api_key is None:
+            raise ValueError("需要提供Alpha Vantage API key")
+    
+    # 定义缓存目录和缓存文件名
+    cache_dir = "cache"
+    if not os.path.exists(cache_dir):
+        os.makedirs(cache_dir)
+    
+    cache_filename = f"av_{ticker}_{month}_{interval}.pkl"
+    cache_path = os.path.join(cache_dir, cache_filename)
+    
+    # 尝试从本地缓存加载数据
+    if os.path.exists(cache_path):
+        try:
+            df = pd.read_pickle(cache_path)
+            print(f"从本地缓存加载{month}的数据")
+            return df
+        except Exception as e:
+            print(f"加载{month}缓存失败，准备重新下载数据:", e)
+    
+    # 构建API URL
+    base_url = "https://www.alphavantage.co/query"
+    params = {
+        "function": "TIME_SERIES_INTRADAY",
+        "symbol": ticker,
+        "interval": interval,
+        "month": month,
+        "outputsize": "full",
+        "apikey": api_key
+    }
+    
+    # 发送请求获取数据
+    response = requests.get(base_url, params=params)
+    data = response.json()
+    
+    # 解析返回的数据
+    time_series_key = f"Time Series ({interval})"
+    if time_series_key not in data:
+        raise ValueError(f"API返回错误: {data.get('Note', data)}")
+    
+    # 将数据转换为DataFrame
+    df = pd.DataFrame.from_dict(data[time_series_key], orient="index")
+    
+    # 重命名列
+    column_map = {
+        "1. open": "open",
+        "2. high": "high",
+        "3. low": "low",
+        "4. close": "close",
+        "5. volume": "volume"
+    }
+    df.rename(columns=column_map, inplace=True)
+    
+    # 转换数据类型
+    for col in ["open", "high", "low", "close"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df["volume"] = pd.to_numeric(df["volume"], errors="coerce")
+    
+    # 设置日期索引
+    df.index = pd.to_datetime(df.index)
+    df = df.sort_index()
+    
+    # 保存数据到本地缓存
+    try:
+        df.to_pickle(cache_path)
+        print(f"{month}的数据已保存到本地缓存")
+    except Exception as e:
+        print(f"保存{month}缓存失败:", e)
+    
+    return df
+
+def load_data_year(ticker: str, year: int, interval: str = "5min", api_key: str = None) -> pd.DataFrame:
+    """
+    使用 Alpha Vantage API 获取指定年份的历史数据。
+    通过按月获取数据并合并来实现。
+    
+    Parameters:
+    -----------
+    ticker : str
+        股票代码
+    year : int
+        目标年份，例如2009
+    interval : str
+        数据频率，可选值：
+        - "1min" : 1分钟
+        - "5min" : 5分钟
+        - "15min" : 15分钟
+        - "30min" : 30分钟
+        - "60min" : 60分钟
+    api_key : str
+        Alpha Vantage API key，如果为None则使用环境变量ALPHA_VANTAGE_API_KEY
+    
+    Returns:
+    --------
+    pd.DataFrame
+        包含该年份所有历史数据的DataFrame
+    """
+    if api_key is None:
+        api_key = os.getenv("ALPHA_VANTAGE_API_KEY")
+        if api_key is None:
+            raise ValueError("需要提供Alpha Vantage API key")
+    
+    # 定义缓存目录和缓存文件名
+    cache_dir = "cache"
+    cache_filename = f"av_{ticker}_{year}_{interval}.pkl"
+    cache_path = os.path.join(cache_dir, cache_filename)
+    
+    # 尝试从本地缓存加载数据
+    if os.path.exists(cache_path):
+        try:
+            df = pd.read_pickle(cache_path)
+            print(f"从本地缓存加载{year}年的数据")
+            return df
+        except Exception as e:
+            print(f"加载{year}年缓存失败，准备重新下载数据:", e)
+    
+    # 获取每个月的数据
+    monthly_data = []
+    for month in range(1, 13):
+        month_str = f"{year}-{month:02d}"
+        try:
+            print(f"获取{month_str}的数据...")
+            df_month = load_data_month(ticker, month_str, interval, api_key)
+            if not df_month.empty:
+                monthly_data.append(df_month)
+            # Alpha Vantage API有访问频率限制，添加延时
+            import time
+            time.sleep(12)  # 每分钟最多5个请求
+        except Exception as e:
+            print(f"获取{month_str}数据失败: {e}")
+    
+    # 合并所有月份的数据
+    if not monthly_data:
+        print(f"警告：{year}年没有获取到任何数据")
+        return pd.DataFrame()
+    
+    df = pd.concat(monthly_data)
+    df = df.sort_index()
+    
+    # 保存数据到本地缓存
+    try:
+        df.to_pickle(cache_path)
+        print(f"{year}年的数据已保存到本地缓存")
+    except Exception as e:
+        print(f"保存{year}年缓存失败:", e)
+    
+    return df 
+
+def load_data_multi_year(ticker: str, start_year: int, end_year: int, interval: str = "5min", api_key: str = None) -> pd.DataFrame:
+    """
+    使用 Alpha Vantage API 获取指定年份范围内的历史数据。
+    通过按年获取数据并合并来实现。
+    
+    Parameters:
+    -----------
+    ticker : str
+        股票代码
+    start_year : int
+        开始年份，例如2009
+    end_year : int
+        结束年份，例如2023
+    interval : str
+        数据频率，可选值：
+        - "1min" : 1分钟
+        - "5min" : 5分钟
+        - "15min" : 15分钟
+        - "30min" : 30分钟
+        - "60min" : 60分钟
+    api_key : str
+        Alpha Vantage API key，如果为None则使用环境变量ALPHA_VANTAGE_API_KEY
+    
+    Returns:
+    --------
+    pd.DataFrame
+        包含指定年份范围内所有历史数据的DataFrame
+    """
+    if start_year > end_year:
+        raise ValueError("start_year 必须小于或等于 end_year")
+    
+    all_data = []
+    
+    for year in range(start_year, end_year + 1):
+        try:
+            print(f"获取 {year} 年的数据...")
+            df_year = load_data_year(ticker, year, interval, api_key)
+            if not df_year.empty:
+                all_data.append(df_year)
+            # Alpha Vantage API有访问频率限制，添加延时
+            import time
+            time.sleep(12)  # 每分钟最多5个请求
+        except Exception as e:
+            print(f"获取 {year} 年数据失败: {e}")
+    
+    if not all_data:
+        print(f"警告：未能获取 {start_year}-{end_year} 年的数据")
+        return pd.DataFrame()
+    
+    df = pd.concat(all_data)
+    df = df.sort_index()
+    
+    return df
+
+def load_data_yf_month(ticker: str, year: int, month: int) -> pd.DataFrame:
+    """
+    使用 yfinance 下载指定月份的日线数据。
+    
+    Parameters:
+    -----------
+    ticker : str
+        股票代码
+    year : int
+        年份，例如2023
+    month : int
+        月份（1-12）
+    
+    Returns:
+    --------
+    pd.DataFrame
+        包含该月份日线数据的DataFrame，包含以下列：
+        - Open: 开盘价
+        - High: 最高价
+        - Low: 最低价
+        - Close: 收盘价
+        - Volume: 成交量
+        - Dividends: 分红
+        - Stock Splits: 股票拆分
+    """
+    # 参数验证
+    if not 1 <= month <= 12:
+        raise ValueError("月份必须在1-12之间")
+    
+    # 计算月份的起止日期
+    start_date = datetime.datetime(year, month, 1)
+    if month == 12:
+        end_date = datetime.datetime(year + 1, 1, 1)
+    else:
+        end_date = datetime.datetime(year, month + 1, 1)
+    
+    # 定义缓存目录和缓存文件名
+    cache_dir = "cache"
+    if not os.path.exists(cache_dir):
+        os.makedirs(cache_dir)
+    
+    cache_filename = f"yf_{ticker}_{year}{month:02d}_1d.pkl"
+    cache_path = os.path.join(cache_dir, cache_filename)
+    
+    # 尝试从本地缓存加载数据
+    if os.path.exists(cache_path):
+        try:
+            df = pd.read_pickle(cache_path)
+            print(f"从本地缓存加载{year}年{month}月的数据")
+            return df
+        except Exception as e:
+            print(f"加载{year}年{month}月缓存失败，准备重新下载数据:", e)
+    
+    # 下载数据
+    print(f"下载{year}年{month}月的数据...")
+    df = yf.download(
+        tickers=ticker,
+        start=start_date.strftime('%Y-%m-%d'),
+        end=end_date.strftime('%Y-%m-%d'),
+        interval='1d'  # 日线数据
+    )
+    
+    if df.empty:
+        print(f"警告：{year}年{month}月没有数据")
+        return df
+    
+    # 保存数据到本地缓存
+    try:
+        df.to_pickle(cache_path)
+        print(f"{year}年{month}月的数据已保存到本地缓存")
+    except Exception as e:
+        print(f"保存{year}年{month}月缓存失败:", e)
+    
+    return df
+
+def load_data_yf_year(ticker: str, year: int) -> pd.DataFrame:
+    """
+    使用 yfinance 下载指定年份的日线数据。
+    
+    Parameters:
+    -----------
+    ticker : str
+        股票代码
+    year : int
+        年份，例如2023
+    
+    Returns:
+    --------
+    pd.DataFrame
+        包含该年份所有日线数据的DataFrame
+    """
+    # 定义缓存目录和缓存文件名
+    cache_dir = "cache"
+    cache_filename = f"yf_{ticker}_{year}_1d.pkl"
+    cache_path = os.path.join(cache_dir, cache_filename)
+    
+    # 尝试从本地缓存加载数据
+    if os.path.exists(cache_path):
+        try:
+            df = pd.read_pickle(cache_path)
+            print(f"从本地缓存加载{year}年的数据")
+            return df
+        except Exception as e:
+            print(f"加载{year}年缓存失败，准备重新下载数据:", e)
+    
+    # 设置年份的起止日期
+    start_date = datetime.datetime(year, 1, 1)
+    end_date = datetime.datetime(year + 1, 1, 1)
+    
+    # 直接下载整年数据
+    print(f"下载{year}年的数据...")
+    df = yf.download(
+        tickers=ticker,
+        start=start_date.strftime('%Y-%m-%d'),
+        end=end_date.strftime('%Y-%m-%d'),
+        interval='1d'  # 日线数据
+    )
+    
+    if df.empty:
+        print(f"警告：{year}年没有数据")
+        return df
+    
+    # 保存数据到本地缓存
+    try:
+        df.to_pickle(cache_path)
+        print(f"{year}年的数据已保存到本地缓存")
+    except Exception as e:
+        print(f"保存{year}年缓存失败:", e)
+    
+    return df
+
+def load_data_yf_years(ticker: str, start_year: int, end_year: int) -> pd.DataFrame:
+    """
+    使用 yfinance 下载指定年份范围的日线数据。
+    
+    Parameters:
+    -----------
+    ticker : str
+        股票代码
+    start_year : int
+        起始年份，例如2020
+    end_year : int
+        结束年份，例如2023
+    
+    Returns:
+    --------
+    pd.DataFrame
+        包含指定年份范围内所有日线数据的DataFrame
+    """
+    if start_year > end_year:
+        raise ValueError("start_year必须小于或等于end_year")
+    
+    # 定义缓存目录和缓存文件名
+    cache_dir = "cache"
+    cache_filename = f"yf_{ticker}_{start_year}_{end_year}_1d.pkl"
+    cache_path = os.path.join(cache_dir, cache_filename)
+    
+    # 尝试从本地缓存加载数据
+    if os.path.exists(cache_path):
+        try:
+            df = pd.read_pickle(cache_path)
+            print(f"从本地缓存加载{start_year}-{end_year}年的数据")
+            return df
+        except Exception as e:
+            print(f"加载{start_year}-{end_year}年缓存失败，准备重新下载数据:", e)
+    
+    # 设置日期范围
+    start_date = datetime.datetime(start_year, 1, 1)
+    end_date = datetime.datetime(end_year + 1, 1, 1)
+    
+    # 直接下载多年数据
+    print(f"下载{start_year}-{end_year}年的数据...")
+    df = yf.download(
+        tickers=ticker,
+        start=start_date.strftime('%Y-%m-%d'),
+        end=end_date.strftime('%Y-%m-%d'),
+        interval='1d',  # 日线数据
+        auto_adjust=True
+    )
+    
+    if df.empty:
+        print(f"警告：{start_year}-{end_year}年没有数据")
+        return df
+    
+    # 保存数据到本地缓存
+    try:
+        df.to_pickle(cache_path)
+        print(f"{start_year}-{end_year}年的数据已保存到本地缓存")
+    except Exception as e:
+        print(f"保存{start_year}-{end_year}年缓存失败:", e)
+    
+    return df
+
+================
+File: plotting/__init__.py
+================
+from .plotting import plot_results
+
+__all__ = ['plot_results']
+
+================
+File: plotting/plotting.py
+================
+def plot_results(cerebro):
+    """
+    负责回测结果的可视化。如果安装了 backtrader_plotting，则使用 Bokeh 进行可视化；
+    否则使用默认的 matplotlib。
+    """
+    try:
+        from backtrader_plotting import Bokeh
+        from backtrader_plotting.schemes import Tradimo
+        b = Bokeh(style='bar', plot_mode='single', scheme=Tradimo(), dark_mode=False)
+        cerebro.plot(b)
+    except ImportError:
+        print("未安装 backtrader_plotting，使用默认 matplotlib 绘图。")
+        cerebro.plot()
+
+================
+File: strategy/__init__.py
+================
+from .buy_and_hold import BuyAndHoldStrategy
+
+================
+File: strategy/buy_and_hold.py
+================
+import backtrader as bt
+
+class BuyAndHoldStrategy(bt.Strategy):
+    """
+    简单的买入并持有策略：
+    1) 在回测开始时买入指定比例的资产
+    2) 持有直到回测结束
+    3) 可选择是否使用风险管理来计算头寸大小
+    
+    用作基准策略，比较其他策略的表现
+    """
+
+    params = (
+        # --- 资金管理 ---
+        ('target_percent', 0.95),    # 默认使用95%的资金买入
+        # --- 风险管理（可选） ---
+        ('use_risk_sizing', False),  # 是否使用风险管理计算头寸
+        ('risk_per_trade', 0.01),    # 单笔风险占总资金的1%
+        ('atr_period', 14),          # ATR周期
+        ('atr_risk_factor', 2.0),    # ATR风险系数（确定止损距离）
+    )
+
+    def log(self, txt, dt=None):
+        """自定义日志函数，可在调试或回测时使用"""
+        dt = dt or self.datas[0].datetime.datetime(0)
+        print(f"{dt.strftime('%Y-%m-%d %H:%M:%S')} {txt}")
+
+    def __init__(self):
+        # 收盘价引用
+        self.dataclose = self.datas[0].close
+        
+        # 跟踪当前挂单（如果有的话）
+        self.order = None
+        
+        # 如果使用风险管理，创建ATR指标
+        if self.p.use_risk_sizing:
+            self.atr = bt.indicators.ATR(
+                self.datas[0],
+                period=self.p.atr_period
+            )
+
+    def notify_order(self, order):
+        """订单状态更新回调"""
+        if order.status in [order.Submitted, order.Accepted]:
+            # 订单提交/接受后，不做特殊处理
+            return
+
+        # 订单完成
+        if order.status in [order.Completed]:
+            if order.isbuy():
+                self.log(f"[成交] 买单执行: 价格={order.executed.price:.2f}, 数量={order.executed.size}")
+            elif order.issell():
+                self.log(f"[成交] 卖单执行: 价格={order.executed.price:.2f}, 数量={order.executed.size}")
+
+            self.order = None
+
+        # 订单取消/保证金不足/拒绝
+        elif order.status in [order.Canceled, order.Margin, order.Rejected]:
+            self.log("[警告] 订单取消/保证金不足/拒绝")
+            self.order = None
+
+    def notify_trade(self, trade):
+        """交易关闭时输出盈亏"""
+        if trade.isclosed:
+            self.log(f"[交易结束] 毛收益: {trade.pnl:.2f}, 净收益: {trade.pnlcomm:.2f}")
+
+    def next(self):
+        """
+        策略核心逻辑：
+        1) 在启动时买入目标仓位
+        2) 之后不再做任何操作，持有至回测结束
+        """
+        # 如果有未完成订单，等待完成
+        if self.order:
+            return
+
+        # 如果还没有持仓，执行买入
+        if not self.position:
+            # 等待数据预热完成（针对ATR情况）
+            if self.p.use_risk_sizing and len(self) < self.p.atr_period:
+                return
+            
+            self.buy_with_sizing()
+
+    def buy_with_sizing(self):
+        """根据策略参数选择合适的仓位管理方式进行买入"""
+        close_price = self.dataclose[0]
+        total_value = self.broker.getvalue()
+        
+        if self.p.use_risk_sizing:
+            # === 基于风险的头寸管理 ===
+            atr_value = self.atr[0]
+            
+            # 计算止损距离（仅用于头寸计算，实际不会设置止损单）
+            stop_dist = self.p.atr_risk_factor * atr_value
+            stop_price = close_price - stop_dist
+            
+            # 计算可承受的最大风险金额
+            risk_amount = total_value * self.p.risk_per_trade
+            
+            # 计算头寸大小
+            risk_per_share = close_price - stop_price
+            
+            # 安全检查
+            if risk_per_share <= 0:
+                self.log("[警告] 风险距离计算有误，使用目标百分比代替")
+                size = int((total_value * self.p.target_percent) / close_price)
+            else:
+                size = int(risk_amount / risk_per_share)
+                
+                # 设置最大百分比限制，避免过度杠杆
+                max_size = int((total_value * self.p.target_percent) / close_price)
+                size = min(size, max_size)
+        else:
+            # === 简单的目标百分比头寸 ===
+            size = int((total_value * self.p.target_percent) / close_price)
+        
+        # 确保至少买入1股
+        size = max(1, size)
+        
+        # 执行买入
+        self.log(f"[买入] 执行买入并持有策略: 价格={close_price:.2f}, 数量={size}")
+        self.order = self.buy(size=size)
+
+    def stop(self):
+        """回测结束时输出最终市值"""
+        portfolio_value = self.broker.getvalue()
+        self.log(f"[回测结束] Buy & Hold 策略最终市值: {portfolio_value:.2f}")
+        
+        # 计算总收益率
+        starting_value = self.broker.startingcash
+        roi = (portfolio_value / starting_value - 1.0) * 100
+        self.log(f"[回测结束] 总收益率: {roi:.2f}%")
+
+
+
+================================================================
+End of Codebase
+================================================================

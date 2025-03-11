@@ -1,6 +1,0 @@
-yfinance>=0.2.36
-backtrader>=1.9.78
-pandas>=2.0.0
-numpy>=1.24.0
-matplotlib>=3.7.0
-backtrader-plotting>=1.0.0  # 可选，用于更好的可视化效果 
